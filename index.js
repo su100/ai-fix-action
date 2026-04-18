@@ -182,6 +182,14 @@ async function main() {
   // Prevent duplicate replies
   if (await alreadyReplied()) return;
 
+  if (!GEMINI_API_KEY) {
+    console.error('[ai-fix] Error: GEMINI_API_KEY is missing.');
+    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
+      body: `❌ **AI Fixer Error**: Gemini API Key is not configured. Please add \`GEMINI_API_KEY\` to your repository secrets.`,
+    });
+    return;
+  }
+
   console.log(
     `[ai-fix] Triggered with "${AI_FIX_TRIGGER}". Starting for PR #${prNumber}...`,
   );
@@ -193,6 +201,11 @@ async function main() {
   if (aiResult !== null) {
     await createSuggestion(aiResult);
     console.log('[ai-fix] Suggestion posted successfully!');
+  } else {
+    console.error('[ai-fix] Failed to generate fix.');
+    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
+      body: `⚠️ **AI Fixer Warning**: Failed to generate a fix suggestion. This could be due to API limits or complex diffs.`,
+    });
   }
 }
 
