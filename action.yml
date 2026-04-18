@@ -1,0 +1,28 @@
+name: 'AI Code Fixer'
+description: 'Automatically generate GitHub suggestions using Gemini AI'
+author: 'YourName'
+
+inputs:
+  gemini_api_key:
+    description: 'Gemini API Key'
+    required: true
+  gemini_model:
+    description: 'Gemini Model to use'
+    required: false
+    default: 'gemini-2.0-flash-lite'
+  gemini_api_version:
+    description: 'Gemini API Version'
+    required: false
+    default: 'v1beta'
+  github_token:
+    description: 'GitHub Token (automatically provided by secrets.GITHUB_TOKEN)'
+    required: true
+    default: ${{ github.token }}
+  trigger_word:
+    description: 'Trigger word to activate the AI fixer'
+    required: false
+    default: '/ai-fix'
+
+runs:
+  using: 'node20'
+  main: 'index.js'
