@@ -240,7 +240,12 @@ async function main() {
   const diffContext = buildDiffContext(files);
 
   const availableModels = await getAvailableModels();
-  const priorityKeywords = [GEMINI_MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro'];
+  const priorityKeywords = [
+    'gemini-2.5-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+    GEMINI_MODEL,
+  ];
 
   const modelsToTry = [];
   for (const keyword of priorityKeywords) {
@@ -258,6 +263,10 @@ async function main() {
 
     if (aiResult === 'QUOTA_EXCEEDED') {
       finalStatus = 'QUOTA_EXCEEDED';
+      console.log(
+        `[ai-fix] ${modelPath} is busy. Waiting 3 seconds before trying next model...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 3000));
       continue;
     } else if (aiResult !== null) {
       finalStatus = 'SUCCESS';
