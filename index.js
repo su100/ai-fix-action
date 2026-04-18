@@ -125,7 +125,7 @@ async function createSuggestion(suggestion) {
 /**
  * Request a code fix suggestion from the Gemini AI model
  */
-async function generateFix(diffContext, comment) {
+async function generateFix(diffContext, comment, modelName = GEMINI_MODEL) {
   const prompt = `Role: Expert Software Engineer.
 Task: Provide a GitHub "suggestion" block to fix the code based on the review comment.
 
@@ -141,7 +141,7 @@ ${comment}
 3. If the fix is to delete the line, return an empty string.
 4. Ensure the code matches the indentation of the original file.`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models/${GEMINI_MODEL}:generateContent`;
+  const geminiUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models/${modelName}:generateContent`;
 
   try {
     const res = await fetch(geminiUrl, {
@@ -219,20 +219,42 @@ async function main() {
 
   const files = await getDiff();
   const diffContext = buildDiffContext(files);
-  const aiResult = await generateFix(diffContext, commentBody);
+  const modelsToTry = [GEMINI_MODEL, 'gemini-1.5-pro', 'gemini-1.5-flash'];
+  const uniqueModels = [...new Set(modelsToTry)];
 
-  if (aiResult === 'QUOTA_EXCEEDED') {
-    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
-      body: `⏳ **AI Fixer Notice**: Gemini API rate limit reached (429). Please wait a minute and try again.`,
-    });
-    process.exit(1);
-  } else if (aiResult !== null) {
+  let aiResult = null;
+  let finalStatus = null;
+
+  for (const model of uniqueModels) {
+    console.log(`[ai-fix] Attempting fix with model: ${model}`);
+    aiResult = await generateFix(diffContext, commentBody, model);
+
+    if (aiResult === 'QUOTA_EXCEEDED') {
+      finalStatus = 'QUOTA_EXCEEDED';
+      continue;
+    } else if (aiResult !== null) {
+      finalStatus = 'SUCCESS';
+      break;
+    }
+  }
+
+  if (finalStatus === 'SUCCESS') {
     await createSuggestion(aiResult);
     console.log('[ai-fix] Suggestion posted successfully!');
-  } else {
-    console.error('[ai-fix] Failed to generate fix.');
+  } else if (finalStatus === 'QUOTA_EXCEEDED') {
+    console.error(
+      '[ai-fix] Critical Error: All attempted Gemini models reached their rate limits (429).',
+    );
     await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
-      body: `⚠️ **AI Fixer Warning**: Failed to generate a fix suggestion. This could be due to API limits or complex diffs.`,
+      body: `⏳ **AI Fixer Notice**: All available Gemini models reached their rate limits. Please try again in a minute.`,
+    });
+    process.exit(1);
+  } else {
+    console.error(
+      '[ai-fix] Critical Error: Failed to generate a fix after exhausting all models.',
+    );
+    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
+      body: `⚠️ **AI Fixer Warning**: Failed to generate a fix suggestion after trying multiple models.`,
     });
     process.exit(1);
   }
