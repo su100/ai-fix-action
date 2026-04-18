@@ -135,11 +135,13 @@ ${diffContext}
 [User Instruction]
 ${comment}
 
-[Rules]
-1. Output ONLY the raw source code that will replace the targeted lines.
-2. NO markdown fences, NO explanations, NO conversational text.
-3. If the fix is to delete the line, return an empty string.
-4. Ensure the code matches the indentation of the original file.`;
+[CRITICAL RULES]
+1. LOOK CLOSELY at the line numbers and the code in the [PR Diff Context].
+2. Identify the SPECIFIC lines the user is talking about. (e.g., if they mention "staleTime", find that line).
+3. Output ONLY the replacement code for those specific lines.
+4. DO NOT invent new code or files. ONLY fix the code described in the instruction.
+5. NO markdown fences, NO explanations.
+6. Match the exact indentation of the original code.`;
 
   const modelPath = modelName.includes('models/')
     ? modelName
