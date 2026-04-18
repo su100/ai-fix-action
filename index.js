@@ -85,15 +85,54 @@ async function getDiff() {
  *     appears in the comment body; fall back to all files if none match.
  *     Still cap at maxChars to stay within the prompt budget.
  */
+/**
+ * Extract the single commented line from a diff_hunk.
+ *
+ * GitHub places the review comment on the LAST line of the hunk, so we
+ * extract that line as the suggestion target and keep a few lines above
+ * as context. This prevents the AI from treating the entire hunk as
+ * "things to rewrite".
+ */
+function extractCommentedLine(hunk) {
+  if (!hunk) return { targetLine: '', context: '' };
+
+  const lines = hunk.split('\n');
+
+  // The commented line is always the last non-empty line in the hunk
+  let lastIdx = lines.length - 1;
+  while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx--;
+
+  const targetRaw = lines[lastIdx] || '';
+  // Strip leading +/- to get actual source code
+  const targetLine = targetRaw.replace(/^[+\- ]/, '');
+
+  // Keep up to 5 preceding lines as context (strip diff prefixes)
+  const contextLines = lines
+    .slice(Math.max(0, lastIdx - 5), lastIdx)
+    .map((l) => l.replace(/^[+\- ]/, ''));
+
+  return { targetLine, context: contextLines.join('\n') };
+}
+
 function buildDiffContext(files) {
   if (!files.length) return '(No changes to display)';
   const maxChars = 14000;
 
-  // ── pull_request_review_comment: use only the diff_hunk ──────────────────
+  // ── pull_request_review_comment: extract only the commented line ──────────
   if (eventName === 'pull_request_review_comment') {
     const hunk = eventData.comment.diff_hunk || '';
     const filePath = eventData.comment.path || '?';
-    return `File: ${filePath}\n${hunk}`;
+    const { targetLine, context } = extractCommentedLine(hunk);
+
+    return [
+      `File: ${filePath}`,
+      ``,
+      `// Context (do NOT modify these lines):`,
+      context,
+      ``,
+      `// ↓ THIS is the only line to change (the review comment was placed here):`,
+      targetLine,
+    ].join('\n');
   }
 
   // ── issue_comment: filter to files mentioned in the comment ──────────────
