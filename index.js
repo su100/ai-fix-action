@@ -196,6 +196,22 @@ ${comment}
     return null;
   }
 }
+async function getAvailableModels() {
+  const listUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models?key=${GEMINI_API_KEY}`;
+  try {
+    const res = await fetch(listUrl);
+    if (!res.ok) return [];
+
+    const data = await res.json();
+
+    return data.models
+      .filter((m) => m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => m.name); // ex: ["models/gemini-1.5-flash", "models/gemini-2.0-flash-lite", ...]
+  } catch (e) {
+    console.error('[ai-fix] Failed to fetch model list:', e.message);
+    return [];
+  }
+}
 
 /**
  * Main execution flow
@@ -222,8 +238,16 @@ async function main() {
 
   const files = await getDiff();
   const diffContext = buildDiffContext(files);
-  const modelsToTry = [GEMINI_MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro'];
-  const uniqueModels = [...new Set(modelsToTry)];
+
+  const availableModels = await getAvailableModels();
+  const priorityKeywords = [GEMINI_MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro'];
+
+  const modelsToTry = [];
+  for (const keyword of priorityKeywords) {
+    const found = availableModels.find((m) => m.includes(keyword));
+    if (found) modelsToTry.push(found);
+  }
+  if (modelsToTry.length === 0) modelsToTry.push(`models/${GEMINI_MODEL}`);
 
   let aiResult = null;
   let finalStatus = null;
