@@ -269,7 +269,7 @@ async function main() {
     if (aiResult === 'QUOTA_EXCEEDED') {
       finalStatus = 'QUOTA_EXCEEDED';
       console.log(
-        `[ai-fix] ${modelPath} is busy. Waiting 3 seconds before trying next model...`,
+        `[ai-fix] ${model} is busy. Waiting 3 seconds before trying next model...`,
       );
       await new Promise((resolve) => setTimeout(resolve, 3000));
       continue;
