@@ -198,34 +198,27 @@ async function createSuggestion(suggestion) {
  */
 async function generateFix(diffContext, comment, modelName = GEMINI_MODEL) {
   const prompt = `Role: Expert Software Engineer.
-Task: Generate the replacement code for a GitHub suggestion block, based on a review comment.
- 
-[How GitHub suggestions work]
-- A suggestion replaces the exact line(s) it is anchored to.
-- The anchor is the line marked "← reviewer clicked here" in the diff context below.
-- Single-line fix: output just that one corrected line.
-- Multi-line fix (e.g. swapping tag order, reordering blocks): output ALL consecutive
-  lines that must change as one contiguous block, from the earliest affected line
-  through the anchor line (inclusive).
-- NEVER output lines that stay unchanged — they will be duplicated in the file.
- 
+Task: Generate ONLY the replacement lines for a GitHub suggestion, based on the review comment.
+
+[How GitHub suggestions work — critical]
+- The diff context below has two sections:
+    [CONTEXT]: lines already in the file. Do NOT output these.
+    [LINES TO REPLACE]: the exact lines your suggestion will overwrite.
+- Your output must be the corrected version of [LINES TO REPLACE] only.
+- Outputting MORE lines than in [LINES TO REPLACE] creates duplicate code in the file.
+- Outputting FEWER lines leaves broken/incomplete code.
+
 [PR Diff Context]
 ${diffContext}
- 
+
 [User Instruction]
 ${comment}
- 
-[CRITICAL RULES]
-1. Output ONLY raw replacement source code. No explanations, no markdown fences, no diff +/- prefixes.
-2. Keep indentation EXACTLY as in the original code.
-3. Do NOT invent new code unrelated to the instruction.
-4. Do NOT repeat lines outside the changed range — that duplicates them in the file.
- 
-Example — swapping two wrapper tags:
-  Before (two lines): <AuthProvider>\n  <AuthWrapper>
-  Instruction: swap order
-  Correct output: <AuthWrapper>\n  <AuthProvider>
-  Wrong output:   </AuthWrapper>\n</AuthProvider>  ← only closing tags, file breaks`;
+
+[OUTPUT RULES]
+1. Output ONLY raw source code. No explanations, no markdown fences, no +/- prefixes.
+2. Keep indentation EXACTLY as in the original.
+3. Do NOT output any line from [CONTEXT] — they are already present in the file.
+4. Do not invent code unrelated to the instruction.`;
 
   const modelPath = modelName.includes('models/')
     ? modelName
