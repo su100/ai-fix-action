@@ -187,7 +187,8 @@ async function main() {
     await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
       body: `❌ **AI Fixer Error**: Gemini API Key is not configured. Please add \`GEMINI_API_KEY\` to your repository secrets.`,
     });
-    return;
+
+    process.exit(1);
   }
 
   console.log(
@@ -206,6 +207,7 @@ async function main() {
     await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
       body: `⚠️ **AI Fixer Warning**: Failed to generate a fix suggestion. This could be due to API limits or complex diffs.`,
     });
+    process.exit(1);
   }
 }
 
