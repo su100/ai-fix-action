@@ -135,13 +135,16 @@ ${diffContext}
 [User Instruction]
 ${comment}
 
-[CRITICAL RULES]
-1. LOOK CLOSELY at the line numbers and the code in the [PR Diff Context].
-2. Identify the SPECIFIC lines the user is talking about. (e.g., if they mention "staleTime", find that line).
-3. Output ONLY the replacement code for those specific lines.
-4. DO NOT invent new code or files. ONLY fix the code described in the instruction.
-5. NO markdown fences, NO explanations.
-6. Match the exact indentation of the original code.`;
+[CRITICAL RULES - MUST FOLLOW]
+1. ONLY modify the specific lines of code that are relevant to the "User Instruction".
+2. DO NOT include any other parts of the file that are not related to the fix.
+3. If the instruction is about "staleTime", ONLY provide the "staleTime" line with the requested changes.
+4. DO NOT invent or generate completely new components (like Signup forms) unless explicitly asked.
+5. Provide ONLY the raw code replacement. No explanations, no markdown fences.
+6. Keep the exact same indentation as the original code.
+
+Bad Example: User asks for a comment, you provide a whole new function.
+Good Example: User asks for a comment, you provide ONLY the original line with the added comment.`;
 
   const modelPath = modelName.includes('models/')
     ? modelName
