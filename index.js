@@ -252,7 +252,7 @@ async function main() {
   let aiResult = null;
   let finalStatus = null;
 
-  for (const model of uniqueModels) {
+  for (const model of modelsToTry) {
     console.log(`[ai-fix] Attempting fix with model: ${model}`);
     aiResult = await generateFix(diffContext, commentBody, model);
 
