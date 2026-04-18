@@ -2,23 +2,23 @@ const fs = require('fs');
 
 const GEMINI_API_KEY = process.env.INPUT_GEMINI_API_KEY;
 const GEMINI_API_VERSION = process.env.INPUT_GEMINI_API_VERSION || 'v1beta';
-const GEMINI_MODEL = process.env.INPUT_GEMINI_MODEL || 'gemini-2.0-flash-lite';
+const GEMINI_MODEL = process.env.INPUT_GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const GITHUB_TOKEN = process.env.INPUT_GITHUB_TOKEN?.trim();
 
 const repo = process.env.GITHUB_REPOSITORY;
 const eventName = process.env.GITHUB_EVENT_NAME;
-const eventPath = process.env.GITHUB_EVENT_PATH;
+const eventData = JSON.parse(
+  fs.readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'),
+);
 
-// Read and parse GitHub event details from the environment path
-const eventData = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+let prNumber, commentId, commentBody, commentPath, commentDiffHunk;
 
-let prNumber, commentId, commentBody;
-
-// Determine PR number and comment details based on the event type
 if (eventName === 'pull_request_review_comment') {
   prNumber = eventData.pull_request.number;
   commentId = eventData.comment.id;
   commentBody = eventData.comment.body;
+  commentPath = eventData.comment.path;
+  commentDiffHunk = eventData.comment.diff_hunk;
 } else if (eventName === 'issue_comment' && eventData.issue.pull_request) {
   prNumber = eventData.issue.number;
   commentId = eventData.comment.id;
@@ -28,11 +28,32 @@ if (eventName === 'pull_request_review_comment') {
 const AI_FIX_TRIGGER = process.env.INPUT_TRIGGER_WORD || '/ai-fix';
 const MARKER_BOT = '<!-- ai-fix:bot -->';
 const replyMarker = (id) => `<!-- ai-fix:reply-to:${id} -->`;
+
 const GITHUB_API_BASE = 'https://api.github.com';
 
 /**
- * Utility for making GitHub API requests
+ * Utility
  */
+
+function trimOuterNewlines(s) {
+  if (s == null || typeof s !== 'string') return '';
+  return s.replace(/^\r?\n+/, '').replace(/\r?\n+$/, '');
+}
+
+function truncateForLog(s, maxLen = 8000) {
+  if (s == null) return '';
+  const t = String(s);
+  return t.length <= maxLen
+    ? t
+    : `${t.slice(0, maxLen)}…(truncated, ${t.length} chars)`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ─── GitHub API ──────────────────────────────────────────────────────────────
+
 async function githubRequest(path, options = {}) {
   const url = `${GITHUB_API_BASE}${path}`;
   const res = await fetch(url, {
@@ -56,11 +77,9 @@ async function githubRequest(path, options = {}) {
 async function githubGet(path) {
   return githubRequest(path);
 }
-
 async function githubPost(path, body) {
   return githubRequest(path, { method: 'POST', body: JSON.stringify(body) });
 }
-
 /**
  * Fetch the list of files changed in the current Pull Request
  */
@@ -69,84 +88,55 @@ async function getDiff() {
   return files || [];
 }
 
+// ─── diff context 빌드 ───────────────────────────────────────────────────────
+
 /**
- * Build a focused diff context for the AI prompt.
- *
- * Strategy by event type:
- *
  * pull_request_review_comment:
- *   → eventData.comment already contains `path` (file) and `diff_hunk`
- *     (the exact context around the commented line).
- *     Use ONLY that hunk — passing the whole PR diff causes the AI to
- *     hallucinate changes in unrelated files.
+ *   diff_hunk를 사용하되, 마지막 +/- 줄(앵커) 이후에 오는
+ *   컨텍스트 줄(공백 접두사)을 제거한다.
+ *   diff_hunk가 앵커 이후 컨텍스트를 포함하면 AI가 그 줄들을
+ *   suggestion에 출력해 파일에 중복이 생기기 때문이다.
  *
  * issue_comment:
- *   → No line anchor exists. Filter PR files to those whose filename
- *     appears in the comment body; fall back to all files if none match.
- *     Still cap at maxChars to stay within the prompt budget.
+ *   줄 앵커가 없으므로 PR 전체 diff를 사용한다.
  */
-/**
- * Extract the single commented line from a diff_hunk.
- *
- * GitHub places the review comment on the LAST line of the hunk, so we
- * extract that line as the suggestion target and keep a few lines above
- * as context. This prevents the AI from treating the entire hunk as
- * "things to rewrite".
- */
-function extractCommentedLine(hunk) {
-  if (!hunk) return { targetLine: '', context: '' };
-
-  const lines = hunk.split('\n');
-
-  // The commented line is always the last non-empty line in the hunk
-  let lastIdx = lines.length - 1;
-  while (lastIdx >= 0 && lines[lastIdx].trim() === '') lastIdx--;
-
-  const targetRaw = lines[lastIdx] || '';
-  // Strip leading +/- to get actual source code
-  const targetLine = targetRaw.replace(/^[+\- ]/, '');
-
-  // Keep up to 5 preceding lines as context (strip diff prefixes)
-  const contextLines = lines
-    .slice(Math.max(0, lastIdx - 5), lastIdx)
-    .map((l) => l.replace(/^[+\- ]/, ''));
-
-  return { targetLine, context: contextLines.join('\n') };
-}
-
 function buildDiffContext(files) {
-  if (!files.length) return '(No changes to display)';
-  const maxChars = 14000;
-
-  // ── pull_request_review_comment: extract only the commented line ──────────
   if (eventName === 'pull_request_review_comment') {
-    const hunk = eventData.comment.diff_hunk || '';
-    const filePath = eventData.comment.path || '?';
-    const { targetLine, context } = extractCommentedLine(hunk);
+    const hunk = commentDiffHunk || '';
+    const filePath = commentPath || '?';
 
-    return [
-      `File: ${filePath}`,
-      ``,
-      `// Context (do NOT modify these lines):`,
-      context,
-      ``,
-      `// ↓ THIS is the only line to change (the review comment was placed here):`,
-      targetLine,
-    ].join('\n');
+    const lines = hunk.split('\n');
+
+    // 마지막 +/- 줄 = 앵커. 그 이후 공백-접두사 컨텍스트 줄을 잘라낸다.
+    let anchorIdx = lines.length - 1;
+    while (anchorIdx >= 0 && !/^[+\-]/.test(lines[anchorIdx])) {
+      anchorIdx--;
+    }
+    const trimmedLines = anchorIdx >= 0 ? lines.slice(0, anchorIdx + 1) : lines;
+
+    // AI에게 넘길 컨텍스트를 구성한다:
+    // - @@ 헤더 줄: 불필요하므로 제외
+    // - - 줄(삭제): 제거될 코드이므로 제외. 남기면 AI가 원본+수정본을 모두 출력해 중복이 생긴다.
+    // - 공백 줄(컨텍스트): 접두사만 제거해 포함 (AI가 위치 파악에 사용)
+    // - + 줄(추가): 현재 PR에서 추가된 코드. 접두사 제거해 포함.
+    const cleanedHunk = trimmedLines
+      .filter((line) => !line.startsWith('@@') && !line.startsWith('-'))
+      .map((line) => line.replace(/^[+ ]/, ''))
+      .join('\n');
+
+    return `File: ${filePath}\n\n${cleanedHunk}`;
   }
 
-  // ── issue_comment: filter to files mentioned in the comment ──────────────
-  const mentionedFiles = files.filter(
-    (f) => f.filename && commentBody.includes(f.filename),
-  );
-  const targetFiles = mentionedFiles.length > 0 ? mentionedFiles : files;
+  // issue_comment fallback
+  if (!files.length) return '(PR에 표시할 코드 변경 없음)';
 
+  const maxChars = 14000;
   const parts = [];
   let used = 0;
-  for (const f of targetFiles) {
-    const filePath = f.filename || '?';
+  for (const f of files) {
+    const path = f.filename || '?';
     const diff = f.patch || '(Binary or no diff)';
-    const block = `File: ${filePath}\n${diff}`;
+    const block = `File: ${path}\n${diff}`;
     if (used + block.length > maxChars) {
       const room = maxChars - used - 80;
       if (room > 400)
@@ -164,11 +154,15 @@ function buildDiffContext(files) {
  */
 async function alreadyReplied() {
   const marker = replyMarker(commentId);
-  const endpoint =
-    eventName === 'pull_request_review_comment'
-      ? `/repos/${repo}/pulls/${prNumber}/comments`
-      : `/repos/${repo}/issues/${prNumber}/comments`;
-  const comments = await githubGet(`${endpoint}?per_page=100`);
+  if (eventName === 'pull_request_review_comment') {
+    const comments = await githubGet(
+      `/repos/${repo}/pulls/${prNumber}/comments?per_page=100`,
+    );
+    return (comments || []).some((c) => c.body && c.body.includes(marker));
+  }
+  const comments = await githubGet(
+    `/repos/${repo}/issues/${prNumber}/comments?per_page=100`,
+  );
   return (comments || []).some((c) => c.body && c.body.includes(marker));
 }
 
@@ -176,7 +170,8 @@ async function alreadyReplied() {
  * Post the AI-generated suggestion to the PR
  */
 async function createSuggestion(suggestion) {
-  if (!suggestion) return;
+  if (suggestion === undefined || suggestion === null) return;
+
   const body = `\`\`\`suggestion\n${suggestion}\n\`\`\`\n${MARKER_BOT}\n${replyMarker(commentId)}`;
 
   if (eventName === 'pull_request_review_comment') {
@@ -185,10 +180,16 @@ async function createSuggestion(suggestion) {
       body,
       in_reply_to: Number(commentId),
     });
-  } else {
-    // Fallback for general issue comments in PR
-    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, { body });
+    console.log(
+      '[ai-fix] Suggestion: review comment 스레드 답글로 게시 (Apply 가능)',
+    );
+    return;
   }
+
+  console.log(
+    '[ai-fix] 경고: 트리거가 일반 issue comment → Apply suggestion 버튼 없을 수 있음',
+  );
+  await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, { body });
 }
 
 // --- Gemini AI Logic ---
@@ -196,181 +197,182 @@ async function createSuggestion(suggestion) {
 /**
  * Request a code fix suggestion from the Gemini AI model
  */
-async function generateFix(diffContext, comment, modelName = GEMINI_MODEL) {
-  const prompt = `Role: Expert Software Engineer.
-Task: Generate ONLY the replacement lines for a GitHub suggestion, based on the review comment.
+function buildSuggestionPrompt(diffContext, comment) {
+  return `You are an expert software engineer. Generate the replacement code for a GitHub suggestion block.
 
-[How GitHub suggestions work — critical]
-- The diff context below has two sections:
-    [CONTEXT]: lines already in the file. Do NOT output these.
-    [LINES TO REPLACE]: the exact lines your suggestion will overwrite.
-- Your output must be the corrected version of [LINES TO REPLACE] only.
-- Outputting MORE lines than in [LINES TO REPLACE] creates duplicate code in the file.
-- Outputting FEWER lines leaves broken/incomplete code.
+[How GitHub suggestions work]
+A suggestion replaces the exact lines where the review comment was placed.
+The code context below shows ONLY the lines up to and including the commented line — nothing after.
+Your output will overwrite those lines exactly, so:
+- Output ONLY the corrected version of the lines shown.
+- Do NOT add lines that come after the shown code — they already exist in the file and will be duplicated.
+- Do NOT repeat unchanged lines — only output lines that need to change.
+- If the fix requires deleting the target line(s), output an empty string.
 
-[PR Diff Context]
+[Code Context]
 ${diffContext}
 
-[User Instruction]
+[Review Comment]
 ${comment}
 
-[OUTPUT RULES]
-1. Output ONLY raw source code. No explanations, no markdown fences, no +/- prefixes.
-2. Keep indentation EXACTLY as in the original.
-3. Do NOT output any line from [CONTEXT] — they are already present in the file.
-4. Do not invent code unrelated to the instruction.`;
+[Output Rules]
+- Raw source code only. No explanations, no markdown fences, no +/- diff prefixes.
+- Keep indentation exactly as in the original.
+- Minimal change: only modify what the review comment asks for.`;
+}
 
-  const modelPath = modelName.includes('models/')
-    ? modelName
-    : `models/${modelName}`;
-  const geminiUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/${modelPath}:generateContent`;
+function stripCodeFences(text) {
+  if (!text) return '';
+  let s = trimOuterNewlines(String(text));
+  const fence = /^```[a-zA-Z]*\n([\s\S]*?)```$/m;
+  const m = s.match(fence);
+  if (m) return trimOuterNewlines(m[1]);
+  return s;
+}
 
+function normalizeSuggestionBody(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  const s = stripCodeFences(trimOuterNewlines(raw));
+  let parsed;
   try {
-    const res = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': GEMINI_API_KEY,
-      },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
-
-    if (!res.ok) {
-      const errorData = await res.json();
-      console.error('[ai-fix] Gemini API Error Status:', res.status);
-      console.error(
-        '[ai-fix] Gemini API Error Details:',
-        JSON.stringify(errorData, null, 2),
-      );
-      if (res.status === 429) {
-        return 'QUOTA_EXCEEDED';
+    parsed = JSON.parse(s);
+  } catch {
+    return s;
+  }
+  if (typeof parsed === 'string') return trimOuterNewlines(parsed);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const keys = ['result', 'code', 'suggestion', 'patch', 'content'];
+    for (const k of keys) {
+      const v = parsed[k];
+      if (typeof v !== 'string') continue;
+      const inner = trimOuterNewlines(v);
+      try {
+        const twice = JSON.parse(inner);
+        if (typeof twice === 'string') return trimOuterNewlines(twice);
+      } catch {
+        /* keep inner */
       }
-      return null;
+      return inner;
     }
-
-    const data = await res.json();
-    console.log(
-      '[ai-fix] Gemini Response Data:',
-      JSON.stringify(data, null, 2),
-    );
-
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) {
-      console.warn('[ai-fix] No text found in Gemini response.');
-      return null;
-    }
-
-    /**
-     * Refined Trimming Logic:
-     * 1. Remove Markdown code fences (```) and language identifiers.
-     * 2. Remove only leading/trailing newlines (\n).
-     * 3. Preserve spaces/tabs at the beginning of lines for correct indentation.
-     */
-    return text
-      .replace(/^```[a-z]*\n/i, '') // Remove opening fence
-      .replace(/\n```$/i, '') // Remove closing fence
-      .replace(/^\r?\n+|\r?\n+$/g, ''); // Trim leading/trailing newlines only
-  } catch (err) {
-    console.error('[ai-fix] Gemini Error:', err.message);
-    return null;
   }
+  return s;
 }
 
-async function getAvailableModels() {
-  const listUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models?key=${GEMINI_API_KEY}`;
+function logGeminiHttpError(status, errBody, headers) {
+  console.error('[ai-fix] Gemini HTTP', status);
+  const retryAfter = headers?.get?.('Retry-After');
+  if (retryAfter) console.error('[ai-fix] Retry-After header:', retryAfter);
   try {
-    const res = await fetch(listUrl);
-    if (!res.ok) return [];
-
-    const data = await res.json();
-
-    return data.models
-      .filter((m) => m.supportedGenerationMethods.includes('generateContent'))
-      .map((m) => m.name);
-  } catch (e) {
-    console.error('[ai-fix] Failed to fetch model list:', e.message);
-    return [];
+    const j = JSON.parse(errBody);
+    if (j.error)
+      console.error(
+        '[ai-fix] Gemini error:',
+        JSON.stringify(j.error, null, 2).slice(0, 4000),
+      );
+  } catch {
+    /* non-JSON */
   }
+  console.error('[ai-fix] Gemini body:\n', truncateForLog(errBody));
 }
 
-/**
- * Main execution flow
- */
+async function generateFix(diffContext, comment) {
+  const prompt = buildSuggestionPrompt(diffContext, comment);
+  const geminiUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models/${GEMINI_MODEL}:generateContent`;
+  const maxAttempts = 2;
+  const retryDelayMs = 4000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': GEMINI_API_KEY,
+        },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        logGeminiHttpError(res.status, errText, res.headers);
+        if (res.status === 429 && attempt < maxAttempts) {
+          console.log(
+            `[ai-fix] Gemini 429 → ${retryDelayMs}ms 후 재시도 (${attempt}/${maxAttempts})`,
+          );
+          await delay(retryDelayMs);
+          continue;
+        }
+        return null;
+      }
+
+      const data = await res.json();
+      if (!data.candidates?.length) {
+        console.error(
+          '[ai-fix] Gemini 200 but no candidates:',
+          truncateForLog(JSON.stringify(data), 6000),
+        );
+        return null;
+      }
+
+      const parts = data.candidates[0]?.content?.parts;
+      const text = parts?.[0]?.text;
+      if (text === undefined || text === null) {
+        console.error(
+          '[ai-fix] Gemini 200 but no text part:',
+          truncateForLog(JSON.stringify(data.candidates[0]), 4000),
+        );
+        return null;
+      }
+
+      return normalizeSuggestionBody(text);
+    } catch (err) {
+      console.error('[ai-fix] Gemini fetch error:', err.message);
+      return null;
+    }
+  }
+  return null;
+}
+
+// ─── main ─────────────────────────────────────────────────────────────────────
+
 async function main() {
-  if (!commentBody?.includes(AI_FIX_TRIGGER)) return;
-
-  if (await alreadyReplied()) return;
-
-  if (!GEMINI_API_KEY) {
-    console.error('[ai-fix] Error: GEMINI_API_KEY is missing.');
-    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
-      body: `❌ **AI Fixer Error**: Gemini API Key is not configured. Please add \`GEMINI_API_KEY\` to your repository secrets.`,
-    });
+  if (!GITHUB_TOKEN) {
+    console.error('[ai-fix] INPUT_GITHUB_TOKEN이 필요합니다.');
     process.exit(1);
   }
+  if (!GEMINI_API_KEY) {
+    console.error('[ai-fix] INPUT_GEMINI_API_KEY가 없습니다.');
+    process.exit(1);
+  }
+  if (!commentBody?.includes(AI_FIX_TRIGGER)) {
+    console.log('[ai-fix] /ai-fix 트리거 없음, 종료');
+    return;
+  }
 
-  console.log(
-    `[ai-fix] Triggered with "${AI_FIX_TRIGGER}". Starting for PR #${prNumber}...`,
-  );
+  console.log(`[ai-fix] repo: ${repo}, PR: #${prNumber}, event: ${eventName}`);
+  console.log(`[ai-fix] Gemini: ${GEMINI_API_VERSION}/${GEMINI_MODEL}`);
 
-  const files = await getDiff();
+  if (await alreadyReplied()) {
+    console.log('[ai-fix] 이미 답글 게시됨, 중복 방지로 종료');
+    return;
+  }
+
+  console.log(`[ai-fix] AI fix triggered for comment ${commentId}`);
+
+  const files =
+    eventName === 'pull_request_review_comment' ? [] : await getDiff();
   const diffContext = buildDiffContext(files);
 
-  const availableModels = await getAvailableModels();
-  const priorityKeywords = [
-    'gemini-2.5-flash-lite',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    GEMINI_MODEL,
-  ];
-
-  const modelsToTry = [];
-  for (const keyword of priorityKeywords) {
-    const found = availableModels.find((m) => m.includes(keyword));
-    if (found) modelsToTry.push(found);
-  }
-  if (modelsToTry.length === 0) modelsToTry.push(`models/${GEMINI_MODEL}`);
-
-  let aiResult = null;
-  let finalStatus = null;
-
-  for (const model of modelsToTry) {
-    console.log(`[ai-fix] Attempting fix with model: ${model}`);
-    aiResult = await generateFix(diffContext, commentBody, model);
-
-    if (aiResult === 'QUOTA_EXCEEDED') {
-      finalStatus = 'QUOTA_EXCEEDED';
-      console.log(
-        `[ai-fix] ${model} is busy. Waiting 3 seconds before trying next model...`,
-      );
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      continue;
-    } else if (aiResult !== null) {
-      finalStatus = 'SUCCESS';
-      break;
-    }
-  }
-
-  if (finalStatus === 'SUCCESS') {
-    await createSuggestion(aiResult);
-    console.log('[ai-fix] Suggestion posted successfully!');
-  } else if (finalStatus === 'QUOTA_EXCEEDED') {
-    console.error(
-      '[ai-fix] Critical Error: All attempted Gemini models reached their rate limits (429).',
+  const aiResult = await generateFix(diffContext, commentBody);
+  if (aiResult === null || aiResult === undefined) {
+    console.log(
+      '[ai-fix] AI 결과 없음 (쿼터, 오류, 또는 API에서 텍스트 미수신)',
     );
-    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
-      body: `⏳ **AI Fixer Notice**: All available Gemini models reached their rate limits. Please try again in a minute.`,
-    });
-    process.exit(1);
-  } else {
-    console.error(
-      '[ai-fix] Critical Error: Failed to generate a fix after exhausting all models.',
-    );
-    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
-      body: `⚠️ **AI Fixer Warning**: Failed to generate a fix suggestion after trying multiple models.`,
-    });
-    process.exit(1);
+    return;
   }
+
+  await createSuggestion(aiResult);
+  console.log('[ai-fix] Suggestion created');
 }
 
 main().catch((e) => {
