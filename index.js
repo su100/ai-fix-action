@@ -152,9 +152,31 @@ ${comment}
       },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
+
+    if (!res.ok) {
+      const errorData = await res.json();
+      console.error('[ai-fix] Gemini API Error Status:', res.status);
+      console.error(
+        '[ai-fix] Gemini API Error Details:',
+        JSON.stringify(errorData, null, 2),
+      );
+      if (res.status === 429) {
+        return 'QUOTA_EXCEEDED';
+      }
+      return null;
+    }
+
     const data = await res.json();
+    console.log(
+      '[ai-fix] Gemini Response Data:',
+      JSON.stringify(data, null, 2),
+    );
+
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!text) return null;
+    if (!text) {
+      console.warn('[ai-fix] No text found in Gemini response.');
+      return null;
+    }
 
     /**
      * Refined Trimming Logic:
@@ -199,7 +221,12 @@ async function main() {
   const diffContext = buildDiffContext(files);
   const aiResult = await generateFix(diffContext, commentBody);
 
-  if (aiResult !== null) {
+  if (aiResult === 'QUOTA_EXCEEDED') {
+    await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
+      body: `⏳ **AI Fixer Notice**: Gemini API rate limit reached (429). Please wait a minute and try again.`,
+    });
+    process.exit(1);
+  } else if (aiResult !== null) {
     await createSuggestion(aiResult);
     console.log('[ai-fix] Suggestion posted successfully!');
   } else {
