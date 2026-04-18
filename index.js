@@ -141,7 +141,9 @@ ${comment}
 3. If the fix is to delete the line, return an empty string.
 4. Ensure the code matches the indentation of the original file.`;
 
-  const modelPath = modelName.includes('/') ? modelName : `models/${modelName}`;
+  const modelPath = modelName.includes('models/')
+    ? modelName
+    : `models/${modelName}`;
   const geminiUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/${modelPath}:generateContent`;
 
   try {
@@ -220,11 +222,7 @@ async function main() {
 
   const files = await getDiff();
   const diffContext = buildDiffContext(files);
-  const modelsToTry = [
-    GEMINI_MODEL,
-    'models/gemini-1.5-pro',
-    'models/gemini-1.5-flash',
-  ];
+  const modelsToTry = [GEMINI_MODEL, 'gemini-1.5-flash', 'gemini-1.5-pro'];
   const uniqueModels = [...new Set(modelsToTry)];
 
   let aiResult = null;
