@@ -70,18 +70,50 @@ async function getDiff() {
 }
 
 /**
- * Build a text context from file diffs for the AI prompt
+ * Build a focused diff context for the AI prompt.
+ *
+ * Strategy by event type:
+ *
+ * pull_request_review_comment:
+ *   → eventData.comment already contains `path` (file) and `diff_hunk`
+ *     (the exact context around the commented line).
+ *     Use ONLY that hunk — passing the whole PR diff causes the AI to
+ *     hallucinate changes in unrelated files.
+ *
+ * issue_comment:
+ *   → No line anchor exists. Filter PR files to those whose filename
+ *     appears in the comment body; fall back to all files if none match.
+ *     Still cap at maxChars to stay within the prompt budget.
  */
 function buildDiffContext(files) {
   if (!files.length) return '(No changes to display)';
   const maxChars = 14000;
+
+  // ── pull_request_review_comment: use only the diff_hunk ──────────────────
+  if (eventName === 'pull_request_review_comment') {
+    const hunk = eventData.comment.diff_hunk || '';
+    const filePath = eventData.comment.path || '?';
+    return `File: ${filePath}\n${hunk}`;
+  }
+
+  // ── issue_comment: filter to files mentioned in the comment ──────────────
+  const mentionedFiles = files.filter(
+    (f) => f.filename && commentBody.includes(f.filename),
+  );
+  const targetFiles = mentionedFiles.length > 0 ? mentionedFiles : files;
+
   const parts = [];
   let used = 0;
-  for (const f of files) {
-    const path = f.filename || '?';
+  for (const f of targetFiles) {
+    const filePath = f.filename || '?';
     const diff = f.patch || '(Binary or no diff)';
-    const block = `File: ${path}\n${diff}`;
-    if (used + block.length > maxChars) break;
+    const block = `File: ${filePath}\n${diff}`;
+    if (used + block.length > maxChars) {
+      const room = maxChars - used - 80;
+      if (room > 400)
+        parts.push(`${block.slice(0, room)}\n... (diff truncated)`);
+      break;
+    }
     parts.push(block);
     used += block.length + 2;
   }
@@ -141,7 +173,7 @@ ${comment}
 3. If the instruction is about "staleTime", ONLY provide the "staleTime" line with the requested changes.
 4. DO NOT invent or generate completely new components (like Signup forms) unless explicitly asked.
 5. Provide ONLY the raw code replacement. No explanations, no markdown fences.
-6. Keep the exact same indentation as the original code.
+6. Keep indentation EXACTLY as it is in the original diff.
 
 Bad Example: User asks for a comment, you provide a whole new function.
 Good Example: User asks for a comment, you provide ONLY the original line with the added comment.`;
@@ -201,6 +233,7 @@ Good Example: User asks for a comment, you provide ONLY the original line with t
     return null;
   }
 }
+
 async function getAvailableModels() {
   const listUrl = `https://generativelanguage.googleapis.com/${GEMINI_API_VERSION}/models?key=${GEMINI_API_KEY}`;
   try {
@@ -211,7 +244,7 @@ async function getAvailableModels() {
 
     return data.models
       .filter((m) => m.supportedGenerationMethods.includes('generateContent'))
-      .map((m) => m.name); // ex: ["models/gemini-1.5-flash", "models/gemini-2.0-flash-lite", ...]
+      .map((m) => m.name);
   } catch (e) {
     console.error('[ai-fix] Failed to fetch model list:', e.message);
     return [];
@@ -222,10 +255,8 @@ async function getAvailableModels() {
  * Main execution flow
  */
 async function main() {
-  // Check if the comment contains the trigger word
   if (!commentBody?.includes(AI_FIX_TRIGGER)) return;
 
-  // Prevent duplicate replies
   if (await alreadyReplied()) return;
 
   if (!GEMINI_API_KEY) {
@@ -233,7 +264,6 @@ async function main() {
     await githubPost(`/repos/${repo}/issues/${prNumber}/comments`, {
       body: `❌ **AI Fixer Error**: Gemini API Key is not configured. Please add \`GEMINI_API_KEY\` to your repository secrets.`,
     });
-
     process.exit(1);
   }
 
@@ -301,7 +331,6 @@ async function main() {
   }
 }
 
-// Start the action
 main().catch((e) => {
   console.error(e);
   process.exit(1);
