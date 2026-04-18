@@ -198,24 +198,34 @@ async function createSuggestion(suggestion) {
  */
 async function generateFix(diffContext, comment, modelName = GEMINI_MODEL) {
   const prompt = `Role: Expert Software Engineer.
-Task: Provide a GitHub "suggestion" block to fix the code based on the review comment.
-
+Task: Generate the replacement code for a GitHub suggestion block, based on a review comment.
+ 
+[How GitHub suggestions work]
+- A suggestion replaces the exact line(s) it is anchored to.
+- The anchor is the line marked "← reviewer clicked here" in the diff context below.
+- Single-line fix: output just that one corrected line.
+- Multi-line fix (e.g. swapping tag order, reordering blocks): output ALL consecutive
+  lines that must change as one contiguous block, from the earliest affected line
+  through the anchor line (inclusive).
+- NEVER output lines that stay unchanged — they will be duplicated in the file.
+ 
 [PR Diff Context]
 ${diffContext}
-
+ 
 [User Instruction]
 ${comment}
-
-[CRITICAL RULES - MUST FOLLOW]
-1. ONLY modify the specific lines of code that are relevant to the "User Instruction".
-2. DO NOT include any other parts of the file that are not related to the fix.
-3. If the instruction is about "staleTime", ONLY provide the "staleTime" line with the requested changes.
-4. DO NOT invent or generate completely new components (like Signup forms) unless explicitly asked.
-5. Provide ONLY the raw code replacement. No explanations, no markdown fences.
-6. Keep indentation EXACTLY as it is in the original diff.
-
-Bad Example: User asks for a comment, you provide a whole new function.
-Good Example: User asks for a comment, you provide ONLY the original line with the added comment.`;
+ 
+[CRITICAL RULES]
+1. Output ONLY raw replacement source code. No explanations, no markdown fences, no diff +/- prefixes.
+2. Keep indentation EXACTLY as in the original code.
+3. Do NOT invent new code unrelated to the instruction.
+4. Do NOT repeat lines outside the changed range — that duplicates them in the file.
+ 
+Example — swapping two wrapper tags:
+  Before (two lines): <AuthProvider>\n  <AuthWrapper>
+  Instruction: swap order
+  Correct output: <AuthWrapper>\n  <AuthProvider>
+  Wrong output:   </AuthWrapper>\n</AuthProvider>  ← only closing tags, file breaks`;
 
   const modelPath = modelName.includes('models/')
     ? modelName
